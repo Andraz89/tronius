@@ -2,30 +2,55 @@
 import Phaser from 'phaser';
 import { SymbolKey, ALL_SYMBOLS } from '../types/symbols';
 import UIButton from '../ui/Button';
+import Animations from './Animations';
 
 export default class SlotScene extends Phaser.Scene {
   private reels: Phaser.GameObjects.Container[] = [];
   private isSpinning = false;
   private checkingResult: string[] = [];
+  // Sounds
   private spinLoopSfx!: Phaser.Sound.BaseSound;
   private ufoLoopSfx!: Phaser.Sound.BaseSound;
   private thunderSfx!: Phaser.Sound.BaseSound;
+  private backgroundMusic!: Phaser.Sound.BaseSound;
+  private coinsSuccess!: Phaser.Sound.BaseSound;
+  // Backgrounds
   private bg!: Phaser.GameObjects.Image;
   private bgNight!: Phaser.GameObjects.Image;
+  // UFOs
   private ufoDown!: Phaser.GameObjects.Image;
   private ufoDownLeft!: Phaser.GameObjects.Image;
   private ufoDownRight!: Phaser.GameObjects.Image;
+  // Lose beams
   private loseBeams: Phaser.GameObjects.Graphics[] = []; // Added for lose beams
+  // Strike timers
   private strikeTimers: Phaser.Time.TimerEvent[] = []; // Added for lightning strike timers
+  // Intro text
+  private introText!: Phaser.GameObjects.Text;
+  private introPanelVisible = true;
+  // Reel backgrounds
+  private reelBackgrounds: Phaser.GameObjects.Graphics[] = []; // To hold background references
+  private winLineIndicators: Phaser.GameObjects.Graphics[] = []; // To hold win line indicators
+  // Lives
+  private lives = 3;
+  private livesText!: Phaser.GameObjects.Text;
+  // Animations
+  private animations!: Animations;
+  
   constructor() { super({ key: 'SlotScene' }); }
 
   preload() {
+    this.lives = 5;
+    this.isSpinning = false;
+    this.introPanelVisible = true;
     this.load.audio('spinLoop', 'assets/audio/slot-machine-reels-sound.mp3');
     this.load.audio('ufoLoop', 'assets/audio/ufo-sound-effect.mp3');
     this.load.audio('thunder', 'assets/audio/thunder.mp3');
+    this.load.audio('backgroundMusic', 'assets/audio/desert-echoes.mp3');
+    this.load.audio('coinsSuccess', 'assets/audio/coins-success.mp3');
     // Load your 5 symbol images
     ALL_SYMBOLS.forEach(key => {
-      this.load.image(key, `assets/${key}.png`);
+      this.load.image(key, `assets/symbols/${key}.png`);
     });
     // Load button image(s)
     this.load.image('spinBtn', 'assets/spin.png');
@@ -39,10 +64,32 @@ export default class SlotScene extends Phaser.Scene {
     // --- Explicitly clear the reels array at the start of create ---
     this.reels = []; 
     // --- End explicit clear ---
-
+    // Lives
+    this.lives = 5;
+    this.isSpinning = false;
+    
+    // Initialize animations FIRST - before anything tries to use it
+    this.animations = new Animations(this);
+    
+    // Sounds
     this.spinLoopSfx  = this.sound.add('spinLoop',  { loop: true, volume: 0.5 });
     this.ufoLoopSfx = this.sound.add('ufoLoop', { loop: false, volume: 0.5 });
     this.thunderSfx = this.sound.add('thunder', { loop: false, volume: 0.5 });
+    this.backgroundMusic = this.sound.add('backgroundMusic', { loop: true, volume: 0.5 });
+    this.coinsSuccess = this.sound.add('coinsSuccess', { loop: false, volume: 0.5 });
+    this.backgroundMusic.addMarker({
+      name: 'backgroundClip',
+      start: 7.0,      
+    });
+    this.backgroundMusic.stop();
+    this.backgroundMusic.play('backgroundClip');
+
+    this.thunderSfx.addMarker({
+      name: 'thunderCut',
+      start: 1.0,     
+      duration: 5.0, 
+    });
+    // Backgrounds
     const { width, height } = this.scale;
     this.bg = this.add
       .image(width/2, height/2, 'bg_day')
@@ -51,11 +98,13 @@ export default class SlotScene extends Phaser.Scene {
       .image(width/2, height/2, 'bg_night')
       .setAlpha(0)
       .setDepth(-1);
+
+    // UFOs
     this.ufoDown = this.add
       .image(width/2, 0, 'ufo-down')
       .setAlpha(0)
       .setDepth(0);
-
+    // UFOs
       this.ufoDownLeft = this.add
       .image(width / 6, 0, 'ufo-down')
       .setAlpha(0)
@@ -70,31 +119,77 @@ export default class SlotScene extends Phaser.Scene {
     this.ufoDown.setScale(0.15);
     this.ufoDownLeft.setScale(0.1);
     this.ufoDownRight.setScale(0.05);
-    /*this.ufoDownLeft.setRotation(Math.PI / 1);  
-    this.ufoDownRight.setRotation(-Math.PI / 1);*/
-    /*this.ufoDownLeft.setOrigin(0, 0);
-    this.ufoDownRight.setOrigin(0, 0);*/
     this.spinLoopSfx.addMarker({
       name: 'fastPart',
       start: 3.0,     
       duration: 6.0, 
     });
-    this.createReels();
+
+
+    // --- Create Intro Panel ---
+    const introMessage = `Welcome to Pharaoh's Final Riddle, brave adventurer!
+
+Deep beneath the blazing desert sun, the ancient Pyramid stands…
+But tonight, its secrets are threatened by otherworldly invaders.
+
+You have 5 spins to repel the alien force and claim the Pharaoh's lost treasure.`;
+
+    this.introText = this.add.text(width / 2, height / 2 - 50, introMessage, {
+        fontSize: '24px',
+        color: '#ffffff',
+        backgroundColor: 'rgba(0,0,0,0.7)',
+        padding: { x: 20, y: 10 },
+        align: 'center',
+        wordWrap: { width: width * 0.7 }
+    }).setOrigin(0.5).setDepth(10); // Ensure it's above reels initially
+
+    // --- End Intro Panel ---
+
+    // --- Add Lives Display ---
+    this.livesText = this.add.text(width - 10, 10, `Spins: ${this.lives}`, {
+        fontSize: '20px',
+        color: '#FFD700', // Gold color
+        align: 'right',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        padding: { x: 5, y: 2 },
+    }).setOrigin(1, 0).setDepth(15).setVisible(false); // Set initial visibility to false
+    // --- End Lives Display ---
+
+    this.createReels(); 
+    this.createWinLines(); 
+
+    // Create the spin button FIRST
     UIButton.create(this, 240, 580, 'spinBtn', 'Spin', () => this.spin());
+    
+    // THEN find it after it's been created
+    const spinButton = this.children.list.find(
+      child => child instanceof Phaser.GameObjects.Image && 
+               child.texture.key === 'spinBtn'
+    ) as Phaser.GameObjects.Image;
+    
+    // THEN add the pulse animation if the button was found
+    if (spinButton) {
+      this.animations.addButtonPulse(spinButton);
+    } else {
+      console.error("Spin button not found! Check UIButton.create implementation.");
+    }
   }
 
   private createReels() {
+    // --- Clear reel backgrounds array ---
+    this.reelBackgrounds = [];
+    // --- End clear ---
     // Create 3 reels
     const startX = 80;
     const symbolHeight = 128;
-    const spacing = symbolHeight + 20;
+    const spacing = symbolHeight + 31;
     const reelViewHeight = symbolHeight * 3; // Height of the visible reel area (3 symbols)
-    
     // Create 3 reels
     for (let col = 0; col < 3; col++) {
         const reelX = startX + col * spacing;
         const reelY = 200;
         const reel = this.add.container(reelX, reelY);
+        reel.setVisible(false); // <<< HIDE REEL INITIALLY
 
         // --- Background Rectangle ---
         const backgroundRect = this.add.graphics();
@@ -106,6 +201,8 @@ export default class SlotScene extends Phaser.Scene {
         backgroundRect.y = reelY;
         // Optional: Add to scene behind the reel container using depth
         backgroundRect.setDepth(-1); // Ensure it's behind symbols (if symbols have default depth 0)
+        backgroundRect.setVisible(false); // <<< HIDE BACKGROUND INITIALLY
+        this.reelBackgrounds.push(backgroundRect); // <<< STORE BACKGROUND REFERENCE
 
         // --- Mask Graphics ---
         const maskGraphics = this.add.graphics();
@@ -115,7 +212,7 @@ export default class SlotScene extends Phaser.Scene {
         maskGraphics.x = reelX;
         maskGraphics.y = reelY;
         // Make the mask graphics object itself invisible
-        maskGraphics.setVisible(false); // This graphics object should not be rendered
+        maskGraphics.setVisible(false); // Mask graphics itself is always invisible
 
         // --- Symbols ---
         // Create 5 symbols per reel and add them to the container
@@ -138,56 +235,79 @@ export default class SlotScene extends Phaser.Scene {
     }
   }
 
+  private createWinLines() {
+    // Clear any existing win lines first
+    this.winLineIndicators.forEach(line => line.destroy());
+    this.winLineIndicators = [];
+    
+    const symbolHeight = 128;
+    const startX = 80;
+    const spacing = symbolHeight + 31;
+    const reelY = 266; // Same as in createReels()
+    
+    // Create a single horizontal line across all reels at the middle row
+    const highlightLineTop = this.add.graphics();
+    highlightLineTop.lineStyle(3, 0xffd700, 1); // Gold color, 3px thick line
+    
+    // Calculate start and end points of the line
+    const leftX = startX - symbolHeight / 2; // Left edge of first reel
+    const rightX = startX + (spacing * 2) + symbolHeight / 2; // Right edge of last reel
+    const middleY = reelY; // Center Y position - this is where the middle symbols appear
+    
+    // Draw a single horizontal line through the middle of all reels
+    highlightLineTop.beginPath();
+    highlightLineTop.moveTo(leftX, middleY);
+    highlightLineTop.lineTo(rightX, middleY);
+    highlightLineTop.strokePath();
+    
+    // Store reference
+    highlightLineTop.setVisible(false); // Initially hidden
+    this.winLineIndicators.push(highlightLineTop);
+    
+    // Add a subtle pulse animation
+
+    const highlightLineBottom = this.add.graphics();
+    highlightLineBottom.lineStyle(3, 0xffd700, 1); // Gold color, 3px thick line
+    highlightLineBottom.beginPath();
+    highlightLineBottom.moveTo(leftX, middleY + symbolHeight);
+    highlightLineBottom.lineTo(rightX, middleY + symbolHeight);
+    highlightLineBottom.strokePath();
+    highlightLineBottom.setVisible(false); // Initially hidden
+    this.winLineIndicators.push(highlightLineBottom);
+    
+    // Create the pulsing animation for the win lines
+    this.animations.createWinLineAnimation(this.winLineIndicators);
+  }
+
   private spin() {
-    if (this.isSpinning) return;
-    this.isSpinning = true;
+    // --- Prevent spin if game over or already spinning ---
+    if (this.isSpinning || this.lives <= 0) return;
+    // --- End check ---
+
+    // --- Handle First Spin ---
+    if (this.introPanelVisible) {
+        this.introText.setVisible(false); // Hide intro text
+        this.reels.forEach(reel => reel.setVisible(true)); // Show reels
+        this.reelBackgrounds.forEach(bg => bg.setVisible(true)); // Show reel backgrounds
+        this.livesText.setVisible(true); // SHOW THE LIVES TEXT when first spinning
+        this.winLineIndicators.forEach(line => line.setVisible(true)); // Show win line indicators
+        this.introPanelVisible = false; // Mark intro as dismissed
+    }
+    // --- End Handle First Spin ---
+
+    this.isSpinning = true; // Set spinning true *after* checks
+    //this.backgroundMusic.stop();
     // Ensure checkingResult is reset correctly for the new spin
     this.checkingResult = new Array(this.reels.length).fill(undefined); 
 
     this.spinLoopSfx.play('fastPart');
     this.ufoLoopSfx.play();
-    const { width, height } = this.scale;
-    const bgNightOffset = { x: 0, y: 0 }; // Customize final position offset for bg_night
-    // Fade out day background
-    this.tweens.add({
-      targets: this.bg,
-      alpha: 0,
-      duration: 1000
-    });
-    // Fade in night background with shake
-    this.tweens.add({
-      targets: this.bgNight,
-      alpha: 1,
-      x: width/2 + bgNightOffset.x,
-      y: height/2 + bgNightOffset.y,
-      duration: 1000,
-      ease: 'Cubic.easeInOut',
-      onStart: () => {
-        this.cameras.main.shake(700, 0.007);
-      }
-    });
-    this.tweens.add({
-      targets: this.ufoDown,
-      alpha: 1,
-      y: 80,
-      duration: 2000,
-      ease: 'Linear'
-    });
-    this.tweens.add({
-      targets: this.ufoDownLeft,
-      alpha: 0.6,
-      y:40,
-      duration: 2000,
-      ease: 'Linear'
-    });
-    this.tweens.add({
-      targets: this.ufoDownRight,
-      alpha: 0.5,
-      y: 60,
-      duration: 2000,
-      ease: 'Linear'
-    });
     
+    // Animate background change
+    this.animations.animateBackgroundChange(this.bg, this.bgNight);
+    
+    // Animate UFOs
+    this.animations.animateUfoEntrance(this.ufoDown, this.ufoDownLeft, this.ufoDownRight);
 
     this.reels.forEach((reel, reelIndex) => {
       const spinCount = Phaser.Math.Between(2, 10) + reelIndex;
@@ -278,210 +398,167 @@ export default class SlotScene extends Phaser.Scene {
 
   // --- Helper method to check spin completion ---
   private checkSpinCompletion() {
-      // Check if all elements in checkingResult have been assigned a value (string key or error string)
       const resultsReceived = this.checkingResult.filter(r => r !== undefined).length;
-      
-      if (resultsReceived === this.reels.length) {
-          // Only proceed if spinning was actually true
-          if (!this.isSpinning) return; 
 
-          this.isSpinning = false; // Set spinning to false *here*
+      if (resultsReceived === this.reels.length) {
+          if (!this.isSpinning) return; // Should already be spinning, but safety check
+
+          // Stop spin sound regardless of outcome here
           this.spinLoopSfx.stop();
 
-          // Check if any reel ended in error (check for string 'error')
           const hasError = this.checkingResult.some(r => typeof r === 'string' && r.startsWith('error'));
 
           if (hasError) {
               console.error("Spin completed with errors in reels:", this.checkingResult);
-              this.showEndScreen(false); // Error -> Lose
+              this.lives = 0; // Treat error as game over
+              this.livesText.setText('Spins: 0');
+               // Directly show lose screen on error
+              this.showEndScreenOverlay(false);
           } else {
-              // Determine win/loss based on valid results (all should be texture keys now)
               const allSame = this.checkingResult.every(k => k === this.checkingResult[0]);
-              console.log(allSame ? 'Win!' : 'No win:', this.checkingResult);
-              this.showEndScreen(allSame);
+              console.log(this.checkingResult); // Log results for debugging
+
+              if (allSame) {
+                  console.log('Win!');
+                  // Win scenario: Animate win, then show win screen
+                  const ufoTargets = [this.ufoDown, this.ufoDownLeft, this.ufoDownRight];
+                  this.animations.animateWinScenario(
+                    this.bgNight, 
+                    this.bg, 
+                    ufoTargets, 
+                    () => this.showEndScreenOverlay(true),
+                    this.coinsSuccess
+                  );
+              } else {
+                  console.log('No win:', this.checkingResult);
+                  this.lives--;
+                  this.livesText.setText(`Spins: ${this.lives}`);
+
+                  // Lose scenario: Animate loss (lightning)
+                  const ufoTargets = [this.ufoDown, this.ufoDownLeft, this.ufoDownRight];
+                  const newTimers = this.animations.animateLoseScenario(
+                    ufoTargets,
+                    this.thunderSfx,
+                    this.loseBeams,
+                    this.strikeTimers,
+                    () => {
+                      if (this.lives <= 0) {
+                          // Game over after animation
+                          this.showEndScreenOverlay(false);
+                      } else {
+                          // Show chances animation AFTER the lightning animation completes
+                          this.animations.showChancesAnimation(this.lives, true);
+                          // Life lost, but game continues
+                          this.isSpinning = false; // Allow spinning again
+                      }
+                    },
+                    (beam) => this.loseBeams.push(beam) // Track beams
+                  );
+                  
+                  // Update timers with the new ones
+                  this.strikeTimers = newTimers || [];
+              }
           }
       }
   }
 
-  /**
-   * Animates the win scenario (UFOs fly away, background changes).
-   * Calls the provided callback when all animations are finished.
-   */
-  private animateWinScenario(onCompleteCallback: () => void) {
-    const { width, height } = this.scale;
-    const baseDuration = 1500; // Use a base duration for coordination
-
-    // Fade out night, fade in day (these can run concurrently)
-    this.tweens.add({ targets: this.bgNight, alpha: 0, duration: baseDuration });
-    this.tweens.add({ targets: this.bg, alpha: 1, duration: baseDuration });
-
-    // UFOs fly away - find the one with the longest duration + delay
-    const ufoDurations = [1200, 1300, 1400];
-    const ufoDelays = [0, 100, 200];
+  private showEndScreenOverlay(win: boolean) {
+    // --- Ensure spinning stops completely before showing overlay ---
+    this.isSpinning = false;
+    
+    // Stop UFO hover effects
     const ufoTargets = [this.ufoDown, this.ufoDownLeft, this.ufoDownRight];
-    let maxEndTime = 0;
-    let lastTween: Phaser.Tweens.Tween | null = null;
-
-    ufoTargets.forEach((ufo, index) => {
-        const duration = ufoDurations[index];
-        const delay = ufoDelays[index];
-        const tween = this.tweens.add({ 
-            targets: ufo, 
-            y: -100, 
-            alpha: 0, 
-            duration: duration, 
-            ease: 'Cubic.easeIn', 
-            delay: delay 
-        });
-        if (delay + duration > maxEndTime) {
-            maxEndTime = delay + duration;
-            lastTween = tween;
-        }
-    });
-
-    // Add the completion callback to the tween that finishes last
-    if (lastTween) {
-        // Explicitly assert the type to resolve the 'never' issue
-        (lastTween as Phaser.Tweens.Tween).on('complete', onCompleteCallback);
-    } else {
-         // Fallback if no UFOs somehow (or instantly trigger if duration is 0)
-        this.time.delayedCall(baseDuration, onCompleteCallback, [], this);
-    }
-  }
-
-  /**
-   * Creates a single jagged lightning beam graphic.
-   */
-  private createLightningBeam(startX: number, startY: number, length: number): Phaser.GameObjects.Graphics {
-    const beamColor = 0xffff00; // Yellow/White for lightning
-    const beamThickness = Phaser.Math.Between(2, 5); // Random thickness
-    const segments = 10; // Number of jagged segments
-    const maxOffset = 15; // Max horizontal deviation
-    this.thunderSfx.play();
-    const beam = this.add.graphics({ x: startX, y: startY });
-    beam.lineStyle(beamThickness, beamColor, 1);
-    beam.beginPath();
-    beam.moveTo(0, 0);
-
-    let currentY = 0;
-    const segmentLength = length / segments;
-
-    for (let i = 1; i <= segments; i++) {
-        const randomX = Phaser.Math.FloatBetween(-maxOffset, maxOffset);
-        currentY += segmentLength;
-        beam.lineTo(randomX, currentY);
-    }
-
-    beam.strokePath();
-    // Set depth: Needs to be above bgNight (-1) but below the overlay (20)
-    beam.setDepth(5); 
-    this.loseBeams.push(beam); // Add to array for later cleanup
-    return beam;
-  }
-
-  /**
-   * Animates the lose scenario (lightning strikes).
-   * Calls the provided callback when all animations are finished.
-   */
-  private animateLoseScenario(onCompleteCallback: () => void) {
-    // Clear previous beams and timers immediately
-    this.loseBeams.forEach(beam => beam.destroy());
-    this.loseBeams = [];
-    this.strikeTimers.forEach(timer => timer.remove());
-    this.strikeTimers = [];
-
-    const numberOfStrikes = 5; 
-    const delayBetweenStrikes = 150; 
-    const flashDuration = 100; 
-    const beamLength = this.scale.height * 0.8; 
-    const ufoTargets = [this.ufoDown, this.ufoDownLeft, this.ufoDownRight];
-    const staggerOffset = 50; // Stagger start times slightly per UFO
-
-    let maxOverallEndTime = 0; // Track when the very last flash disappears
-
-    ufoTargets.forEach((ufo, index) => {
-      if (ufo.alpha <= 0) return;
-
-      const startX = ufo.x;
-      const startY = ufo.y + (ufo.displayHeight * ufo.scaleY * 0.5);
-      const currentUfoStartTime = index * staggerOffset;
-
-      // Calculate when the last flash for *this* UFO will disappear
-      const lastStrikeStartTime = currentUfoStartTime + (numberOfStrikes - 1) * delayBetweenStrikes;
-      const lastStrikeEndTime = lastStrikeStartTime + flashDuration;
-      maxOverallEndTime = Math.max(maxOverallEndTime, lastStrikeEndTime);
-
-      // Create the timed event for strikes (logic remains the same)
-      const timer = this.time.addEvent({
-          delay: delayBetweenStrikes,
-          callback: () => {
-              const beam = this.createLightningBeam(startX, startY, beamLength);
-              this.time.delayedCall(flashDuration, () => {
-                  if (beam && beam.active) {
-                      beam.destroy();
-                  }
-              }, [], this);
-          },
-          repeat: numberOfStrikes - 1, 
-          startAt: currentUfoStartTime, // Use calculated start time
-          callbackScope: this
-      });
-      this.strikeTimers.push(timer);
-    });
-
-    // Schedule the final callback after the last flash should have disappeared
-    if (maxOverallEndTime > 0) {
-        this.time.delayedCall(maxOverallEndTime + 100, onCompleteCallback, [], this); // Add small buffer
-    } else {
-        // If no UFOs were visible, call back immediately
-        onCompleteCallback();
-    }
-  }
-
-  private showEndScreen(win: boolean) {
+    this.animations.stopUfoHoverAnimations(ufoTargets);
+    
     const { width, height } = this.scale;
 
-    const createEndScreenElements = () => {
-      // 1) dark overlay
-      const overlay = this.add.graphics()
-        .fillStyle(0x000000, 0.6)
-        .fillRect(0, 0, width, height)
-        .setDepth(20); 
-
-      // 2) Determine message
-      const msg = win ? 'You Have Uncovered the Pharaoh\'s Treasure!' : '😞 YOU LOSE 😞';
-
-      const label = this.add.text(width/2, height/2, msg, {
-        fontSize: '32px',
-        color: '#ffffff',
-        align: 'center',
-        wordWrap: { width: width * 0.8 } 
-      }).setOrigin(0.5).setDepth(21); 
-
-      // 3) click to RESTART the scene
-      this.input.once('pointerdown', () => {
-        // Stop any ongoing sounds that might persist across restarts
-        this.spinLoopSfx?.stop(); 
+    // Define Restart Logic first (used by overlay click)
+    const restartGame = () => {
+        console.log('Restarting the game...');
         
-        // Remove timers explicitly (good practice even with restart)
+        // IMPORTANT: Stop all sounds in the sound manager
+        this.sound.stopAll();
+        
+        // Remove timers explicitly
         this.strikeTimers.forEach(timer => timer.remove());
         this.strikeTimers = [];
-        
+
         // Restart the current scene
-        this.scene.restart(); 
-      });
+        this.scene.restart();
     };
 
-    // Trigger the appropriate animation and pass the function as the callback
-    if (win) {
-      this.loseBeams.forEach(beam => beam.destroy());
-      this.loseBeams = [];
-      this.strikeTimers.forEach(timer => timer.remove());
-      this.strikeTimers = [];
-      this.animateWinScenario(createEndScreenElements);
-    } else {
-      this.animateLoseScenario(createEndScreenElements);
-    }
-  } // End of showEndScreen
+    // 1) Create a Rectangle instead of a Graphics object
+    const overlay = this.add.rectangle(
+        width / 2,   // x position (center)
+        height / 2,  // y position (center)
+        width,      // width to cover screen
+        height,     // height to cover screen
+        0x000000,   // color (black)
+        0.7         // alpha (70% opaque)
+    ).setDepth(20)
+     .setOrigin(0.5); // Center origin
+      
+    // Explicitly enable input for both the overlay and the scene
+    this.input.enabled = true;
+    
+    // 2) Determine message
+    const msg = win ? 'You Have Uncovered the Pharaoh\'s Treasure!' : 'GAME OVER';
 
-} // End of class
+    const label = this.add.text(width/2, height/2 - 30, msg, { // Adjusted Y position slightly
+      fontSize: '36px', // Larger font
+      color: win ? '#FFD700' : '#FF4444', // Gold for win, Red for lose
+      backgroundColor: 'rgba(0,0,0,0.8)',
+      padding: { x: 25, y: 15 },
+      align: 'center',
+      wordWrap: { width: width * 0.8 }
+    }).setOrigin(0.5).setDepth(21); // Ensure text is above overlay
+
+    // 3) Add "Click anywhere" text
+    const instructionText = this.add.text(width / 2, height / 2 + 80, 'Click anywhere or press SPACE to play again', { 
+        fontSize: '16px',
+        color: '#ffffff',
+        align: 'center'
+    }).setOrigin(0.5).setDepth(21);
+
+    // 4) Add multiple ways to restart the game
+    
+    // a) Make Rectangle interactive with a larger hit area
+    overlay.setInteractive(
+      new Phaser.Geom.Rectangle(0, 0, width, height),
+      Phaser.Geom.Rectangle.Contains
+    ).on('pointerdown', () => {
+      console.log('Overlay clicked!');
+      restartGame();
+    });
+    
+    // b) Make SPACE key also restart the game
+    this.input.keyboard?.on('keydown-SPACE', restartGame);
+    
+    // c) Make any mouse click restart (as a fallback)
+    this.input.on('pointerdown', () => {
+      console.log('Scene clicked!');
+      restartGame();
+    });
+    
+    // d) Make instruction text also interactive, for good measure
+    instructionText.setInteractive().on('pointerdown', restartGame);
+    
+    // e) As an absolute last resort, add a DOM event listener
+    if (typeof window !== 'undefined') {
+      const domClickHandler = () => {
+        console.log('DOM clicked!');
+        restartGame();
+        // Remove this listener after first use
+        window.removeEventListener('click', domClickHandler);
+      };
+      window.addEventListener('click', domClickHandler);
+      
+      // Clean up DOM listener if scene is destroyed
+      this.events.once('destroy', () => {
+        window.removeEventListener('click', domClickHandler);
+      });
+    }
+
+    console.log('End screen displayed - waiting for input to restart');
+  } // End of showEndScreenOverlay
+}

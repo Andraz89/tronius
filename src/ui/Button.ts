@@ -11,7 +11,7 @@ export default class UIButton {
   ) {
     const btn = scene.add.image(x, y, texture)
       .setInteractive()
-      .setScale(0.2);
+      .setScale(0.15);
     btn.on('pointerdown', callback);
 
     // Optional: add text on top
